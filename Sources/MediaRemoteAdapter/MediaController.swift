@@ -17,7 +17,6 @@ public class MediaController {
     private var lastTrackInfo: TrackInfo?
     private var eventCount = 0
     private let restartThreshold = 100
-    private let maxBufferedOutputBytes = 64 * 1024 * 1024
     private let commandQueue = DispatchQueue(label: "mediaremote-adapter.commands")
     private static let sigpipeIgnored: Void = {
         signal(SIGPIPE, SIG_IGN)
@@ -209,22 +208,6 @@ public class MediaController {
             }
 
             self.dataBuffer.append(incomingData)
-            if self.dataBuffer.count > self.maxBufferedOutputBytes {
-                let bufferedData = self.dataBuffer
-                fileHandle.readabilityHandler = nil
-                DispatchQueue.main.async {
-                    self.onDecodingError?(
-                        NSError(
-                            domain: "MediaRemoteAdapter",
-                            code: 1,
-                            userInfo: [NSLocalizedDescriptionKey: "MediaRemote listener output exceeded \(self.maxBufferedOutputBytes) bytes without a complete line."]
-                        ),
-                        bufferedData
-                    )
-                    self.restartListeningProcess()
-                }
-                return
-            }
 
             guard let newlineData = "\n".data(using: .utf8) else { return }
             while let range = self.dataBuffer.firstRange(of: newlineData, in: self.dataBufferSearchStart..<self.dataBuffer.count) {
