@@ -13,9 +13,11 @@ public class MediaController {
     private var listeningProcess: Process?
     private var listeningInputPipe: Pipe?
     private var dataBuffer = Data()
+    private var dataBufferSearchStart = 0
     private var lastTrackInfo: TrackInfo?
     private var eventCount = 0
     private let restartThreshold = 100
+    private let maxBufferedOutputBytes = 64 * 1024 * 1024
     private let commandQueue = DispatchQueue(label: "mediaremote-adapter.commands")
     private static let sigpipeIgnored: Void = {
         signal(SIGPIPE, SIG_IGN)
@@ -112,6 +114,7 @@ public class MediaController {
         getProcess.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
 
         var getDataBuffer = Data()
+        var getDataBufferSearchStart = 0
         var callbackExecuted = false
 
         getProcess.arguments = [scriptPath, libraryPath, "get"]
@@ -129,13 +132,15 @@ public class MediaController {
             getDataBuffer.append(incomingData)
 
             guard let newlineData = "\n".data(using: .utf8),
-                  let range = getDataBuffer.firstRange(of: newlineData),
+                  let range = getDataBuffer.firstRange(of: newlineData, in: getDataBufferSearchStart..<getDataBuffer.count),
                   range.lowerBound <= getDataBuffer.count else {
+                getDataBufferSearchStart = getDataBuffer.count
                 return
             }
 
             let lineData = getDataBuffer.subdata(in: 0..<range.lowerBound)
             getDataBuffer.removeSubrange(0..<range.upperBound)
+            getDataBufferSearchStart = 0
 
             if !lineData.isEmpty && !callbackExecuted {
                 callbackExecuted = true
@@ -204,9 +209,25 @@ public class MediaController {
             }
 
             self.dataBuffer.append(incomingData)
+            if self.dataBuffer.count > self.maxBufferedOutputBytes {
+                let bufferedData = self.dataBuffer
+                fileHandle.readabilityHandler = nil
+                DispatchQueue.main.async {
+                    self.onDecodingError?(
+                        NSError(
+                            domain: "MediaRemoteAdapter",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "MediaRemote listener output exceeded \(self.maxBufferedOutputBytes) bytes without a complete line."]
+                        ),
+                        bufferedData
+                    )
+                    self.restartListeningProcess()
+                }
+                return
+            }
 
             guard let newlineData = "\n".data(using: .utf8) else { return }
-            while let range = self.dataBuffer.firstRange(of: newlineData) {
+            while let range = self.dataBuffer.firstRange(of: newlineData, in: self.dataBufferSearchStart..<self.dataBuffer.count) {
                 guard range.lowerBound <= self.dataBuffer.count else {
                     break
                 }
@@ -214,6 +235,7 @@ public class MediaController {
                 let lineData = self.dataBuffer.subdata(in: 0..<range.lowerBound)
 
                 self.dataBuffer.removeSubrange(0..<range.upperBound)
+                self.dataBufferSearchStart = 0
 
                 if lineData == "NIL".data(using: .utf8) {
                     DispatchQueue.main.async {
@@ -243,6 +265,8 @@ public class MediaController {
                     }
                 }
             }
+
+            self.dataBufferSearchStart = self.dataBuffer.count
         }
 
         listeningProcess?.terminationHandler = { [weak self] process in
@@ -268,6 +292,8 @@ public class MediaController {
         listeningProcess?.terminate()
         listeningProcess = nil
         listeningInputPipe = nil
+        dataBuffer.removeAll()
+        dataBufferSearchStart = 0
     }
 
     private func sendCommand(_ arguments: [String]) {
@@ -389,6 +415,7 @@ public class MediaController {
         listeningProcess = nil
         listeningInputPipe = nil
         dataBuffer.removeAll()
+        dataBufferSearchStart = 0
         eventCount = 0
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
